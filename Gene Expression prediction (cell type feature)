@@ -1,1 +1,1263 @@
-{"metadata":{"kernelspec":{"language":"python","display_name":"Python 3","name":"python3"},"language_info":{"name":"python","version":"3.12.12","mimetype":"text/x-python","codemirror_mode":{"name":"ipython","version":3},"pygments_lexer":"ipython3","nbconvert_exporter":"python","file_extension":".py"},"kaggle":{"accelerator":"none","dataSources":[{"sourceId":20182,"databundleVersionId":1117628,"sourceType":"competition"}],"dockerImageVersionId":31236,"isInternetEnabled":true,"language":"python","sourceType":"notebook","isGpuEnabled":false}},"nbformat_minor":4,"nbformat":4,"cells":[{"cell_type":"code","source":"# This Python 3 environment comes with many helpful analytics libraries installed\n# It is defined by the kaggle/python Docker image: https://github.com/kaggle/docker-python\n# For example, here's several helpful packages to load\n\nimport numpy as np # linear algebra\nimport pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)\n\n# Input data files are available in the read-only \"../input/\" directory\n# For example, running this (by clicking run or pressing Shift+Enter) will list all files under the input directory\n\nimport os\nfor dirname, _, filenames in os.walk('/kaggle/input'):\n    for filename in filenames:\n        print(os.path.join(dirname, filename))\n\n# You can write up to 20GB to the current directory (/kaggle/working/) that gets preserved as output when you create a version using \"Save & Run All\" \n# You can also write temporary files to /kaggle/temp/, but they won't be saved outside of the current session","metadata":{"_uuid":"8f2839f25d086af736a60e9eeb907d3b93b6e0e5","_cell_guid":"b1076dfc-b9ad-4769-8c92-a6c4dae69d19","trusted":true,"execution":{"iopub.status.busy":"2026-01-11T12:17:25.679925Z","iopub.execute_input":"2026-01-11T12:17:25.680758Z","iopub.status.idle":"2026-01-11T12:17:25.962852Z","shell.execute_reply.started":"2026-01-11T12:17:25.680726Z","shell.execute_reply":"2026-01-11T12:17:25.962087Z"}},"outputs":[{"name":"stdout","text":"/kaggle/input/gene-expression-prediction-cs1850-final/sample_submission.csv\n/kaggle/input/gene-expression-prediction-cs1850-final/train.npz\n/kaggle/input/gene-expression-prediction-cs1850-final/info.py\n/kaggle/input/gene-expression-prediction-cs1850-final/eval.npz\n/kaggle/input/gene-expression-prediction-cs1850-final/seq_data.csv\n","output_type":"stream"}],"execution_count":1},{"cell_type":"markdown","source":"\n- In the first notebook ([Gene Expression prediction (Baseline + 1D CNN)](http://www.kaggle.com/code/mariamali12/gene-expression-prediction-baseline-1d-cnn)), we built a 1D CNN model to predict the gene expression using histone markers as a feature.\n  \n- In this notebook, we will extend our work and try to improve our model performance using an additional feature (cell type)\n\n- What we are trying to answer in this notebook is could adding cell type info improve the model performance? \n  ","metadata":{}},{"cell_type":"markdown","source":"# Libraries Importing ","metadata":{}},{"cell_type":"code","source":"import random\nimport matplotlib.pyplot as plt\nfrom sklearn.model_selection import train_test_split\nfrom sklearn.linear_model import Ridge\nfrom sklearn.metrics import mean_squared_error, r2_score\nfrom sklearn.preprocessing import StandardScaler\nimport tensorflow as tf\nfrom tensorflow.keras.models import Sequential\nfrom tensorflow.keras.layers import Conv1D, MaxPooling1D, Flatten, Dense, Dropout, GlobalAveragePooling1D, BatchNormalization\nfrom tensorflow.keras.callbacks import EarlyStopping\nfrom tensorflow.keras.regularizers import l2","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:04:20.742177Z","iopub.execute_input":"2026-01-10T18:04:20.742502Z","iopub.status.idle":"2026-01-10T18:04:24.09596Z","shell.execute_reply.started":"2026-01-10T18:04:20.742478Z","shell.execute_reply":"2026-01-10T18:04:24.095254Z"}},"outputs":[],"execution_count":null},{"cell_type":"code","source":"#Set Random seeds\nSEED = 42\n\nos.environ[\"PYTHONHASHSEED\"] = str(SEED)\nrandom.seed(SEED)\nnp.random.seed(SEED)\ntf.random.set_seed(SEED)","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:04:24.097005Z","iopub.execute_input":"2026-01-10T18:04:24.0976Z","iopub.status.idle":"2026-01-10T18:04:24.101682Z","shell.execute_reply.started":"2026-01-10T18:04:24.097568Z","shell.execute_reply":"2026-01-10T18:04:24.10096Z"}},"outputs":[],"execution_count":null},{"cell_type":"markdown","source":"# Exploring Datasets","metadata":{}},{"cell_type":"code","source":"#Load training dataset\ntrain_data = np.load('/kaggle/input/gene-expression-prediction-cs1850-final/train.npz',allow_pickle=True)\nlen(train_data.files)","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:04:24.275462Z","iopub.execute_input":"2026-01-10T18:04:24.275672Z","iopub.status.idle":"2026-01-10T18:04:24.29259Z","shell.execute_reply.started":"2026-01-10T18:04:24.275654Z","shell.execute_reply":"2026-01-10T18:04:24.291955Z"}},"outputs":[],"execution_count":null},{"cell_type":"code","source":"#Load testing dataset\neval_data = np.load('/kaggle/input/gene-expression-prediction-cs1850-final/eval.npz',allow_pickle=True)\nlen(eval_data.files)","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:04:24.293714Z","iopub.execute_input":"2026-01-10T18:04:24.294005Z","iopub.status.idle":"2026-01-10T18:04:24.310372Z","shell.execute_reply.started":"2026-01-10T18:04:24.293976Z","shell.execute_reply":"2026-01-10T18:04:24.309848Z"}},"outputs":[],"execution_count":null},{"cell_type":"markdown","source":"### Training dataset structure:\n- **First column:** gene ID\n- **Second-sixth columns:** histone modification measurements\n- **Seventh column:** gene expression\n\n### Each cell type contains:\n- 16000 genes\n- 100 bins\n- 5 histone markers","metadata":{}},{"cell_type":"code","source":"# Keys to npzfile of train & eval\ntrain_cells = ['E065', 'E004', 'E066', 'E005', 'E012', 'E027', 'E053', 'E013', 'E028', 'E061', 'E109', 'E120',\n               'E062', 'E037', 'E038', 'E024', 'E105', 'E011', 'E106', 'E082', 'E097', 'E116', 'E098', 'E058', \n'E117', 'E059', 'E070', 'E118', 'E085', 'E104', 'E119', 'E006', 'E127', 'E047', 'E094', 'E007', 'E054', 'E128',\n               'E095', 'E055', 'E114', 'E100', 'E056', 'E016', 'E122', 'E057', 'E123', 'E079', 'E003', 'E050']\n\neval_cells = ['E065', 'E004', 'E066', 'E005', 'E012', 'E027', 'E053', 'E013', 'E028', 'E061', 'E109', 'E120', \n              'E062', 'E037', 'E038', 'E024', 'E071', 'E105', 'E087', 'E011', 'E106', 'E096', 'E082', 'E097', \n'E116', 'E098', 'E058', 'E117', 'E084', 'E059', 'E070', 'E118', 'E085', 'E104', 'E119', 'E006', 'E112', 'E127',\n              'E047', 'E094', 'E007', 'E054', 'E113', 'E128', 'E095', 'E055', 'E114', 'E100', 'E056', 'E016', 'E122',\n              'E057', 'E123', 'E079', 'E003', 'E050']","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:04:24.526652Z","iopub.execute_input":"2026-01-10T18:04:24.526962Z","iopub.status.idle":"2026-01-10T18:04:24.543197Z","shell.execute_reply.started":"2026-01-10T18:04:24.526933Z","shell.execute_reply":"2026-01-10T18:04:24.542495Z"}},"outputs":[],"execution_count":null},{"cell_type":"code","source":"# Combine Train Data to use information from all cells\ntrain_inputs = [] # histone mark data (X)\ntrain_outputs = [] # expression value (y)\nfor cell in train_cells:\n    cell_data = train_data[cell]\n    hm_data = cell_data[:,:,1:6]\n    hm_flat = hm_data.reshape(hm_data.shape[0], -1)\n    exp_values = cell_data[:,0,6]\n    train_inputs.append(hm_flat)\n    train_outputs.append(exp_values)\n\ntrain_inputs = np.concatenate(train_inputs, axis=0)\ntrain_outputs = np.concatenate(train_outputs, axis=0)","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:04:24.544103Z","iopub.execute_input":"2026-01-10T18:04:24.54435Z","iopub.status.idle":"2026-01-10T18:04:33.493653Z","shell.execute_reply.started":"2026-01-10T18:04:24.54433Z","shell.execute_reply":"2026-01-10T18:04:33.493083Z"}},"outputs":[],"execution_count":null},{"cell_type":"code","source":"print(train_inputs.shape)\nprint(train_outputs.shape)","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:04:33.494635Z","iopub.execute_input":"2026-01-10T18:04:33.49496Z","iopub.status.idle":"2026-01-10T18:04:33.49895Z","shell.execute_reply.started":"2026-01-10T18:04:33.494929Z","shell.execute_reply":"2026-01-10T18:04:33.49832Z"}},"outputs":[],"execution_count":null},{"cell_type":"code","source":"# Prepare Eval inputs in a similar way\neval_inputs = []\nfor cell in eval_cells:\n    cell_data = eval_data[cell]\n    hm_data = cell_data[:,:,1:6]\n    eval_inputs.append(hm_data)\n\neval_inputs = np.concatenate(eval_inputs, axis=0)","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:51:01.575536Z","iopub.execute_input":"2026-01-10T18:51:01.575823Z","iopub.status.idle":"2026-01-10T18:51:03.46521Z","shell.execute_reply.started":"2026-01-10T18:51:01.575798Z","shell.execute_reply":"2026-01-10T18:51:03.464601Z"}},"outputs":[],"execution_count":null},{"cell_type":"code","source":"print(eval_inputs.shape)","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:51:04.698473Z","iopub.execute_input":"2026-01-10T18:51:04.69908Z","iopub.status.idle":"2026-01-10T18:51:04.702841Z","shell.execute_reply.started":"2026-01-10T18:51:04.699052Z","shell.execute_reply":"2026-01-10T18:51:04.701955Z"}},"outputs":[],"execution_count":null},{"cell_type":"code","source":"#explore the expression values statistically\n\nprint(\"Mean:\", np.mean(train_outputs))\nprint(\"Std:\", np.std(train_outputs))\nprint(\"Min:\", np.min(train_outputs))\nprint(\"Max:\", np.max(train_outputs))","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:04:35.526125Z","iopub.execute_input":"2026-01-10T18:04:35.526486Z","iopub.status.idle":"2026-01-10T18:04:35.5454Z","shell.execute_reply.started":"2026-01-10T18:04:35.526456Z","shell.execute_reply":"2026-01-10T18:04:35.544816Z"}},"outputs":[],"execution_count":null},{"cell_type":"markdown","source":"# Model Building","metadata":{}},{"cell_type":"markdown","source":"# Build 1D CNN model","metadata":{}},{"cell_type":"code","source":"#converting the training data shape back to its original shape\nX = train_inputs.reshape(800000, 100, 5)\n#converting the evaluation data shape back to its original shape\ny = train_outputs","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:04:38.850968Z","iopub.execute_input":"2026-01-10T18:04:38.851216Z","iopub.status.idle":"2026-01-10T18:04:38.85938Z","shell.execute_reply.started":"2026-01-10T18:04:38.851192Z","shell.execute_reply":"2026-01-10T18:04:38.85873Z"}},"outputs":[],"execution_count":null},{"cell_type":"code","source":"#scaling the target\nscaler = StandardScaler()\ny_scaled = scaler.fit_transform(y.reshape(-1, 1)).ravel()","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:04:38.860357Z","iopub.execute_input":"2026-01-10T18:04:38.860703Z","iopub.status.idle":"2026-01-10T18:04:38.90923Z","shell.execute_reply.started":"2026-01-10T18:04:38.860671Z","shell.execute_reply":"2026-01-10T18:04:38.908691Z"}},"outputs":[],"execution_count":null},{"cell_type":"code","source":"#train/validate split\nX_train, X_val, y_train, y_val = train_test_split(X, y_scaled, test_size=0.2, random_state=42)","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:04:38.909895Z","iopub.execute_input":"2026-01-10T18:04:38.910153Z","iopub.status.idle":"2026-01-10T18:04:39.487484Z","shell.execute_reply.started":"2026-01-10T18:04:38.910129Z","shell.execute_reply":"2026-01-10T18:04:39.486931Z"}},"outputs":[],"execution_count":null},{"cell_type":"code","source":"#Cov1D structure\n\nmodel = Sequential([\n    Conv1D(32,kernel_size = 5,padding=\"same\", activation = 'relu', input_shape = (100,5), kernel_regularizer=l2(1e-5)),\n\n    Conv1D(64,kernel_size = 5, padding=\"same\", activation = 'relu'),\n    MaxPooling1D(pool_size = 2),\n\n    Conv1D(128, kernel_size=7, padding=\"same\", activation=\"relu\"),\n    BatchNormalization(),\n    GlobalAveragePooling1D(),\n\n    \n    Dense(128, activation = 'relu'),\n    Dropout(0.2),\n\n    Dense(1, activation = 'linear')\n])\n\nmodel.compile(\n    optimizer = tf.keras.optimizers.Adam(learning_rate=5e-4),\n    loss = 'mse',\n    metrics = ['mse']\n)\n\nmodel.summary()","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:04:39.488256Z","iopub.execute_input":"2026-01-10T18:04:39.488448Z","iopub.status.idle":"2026-01-10T18:04:40.586628Z","shell.execute_reply.started":"2026-01-10T18:04:39.488429Z","shell.execute_reply":"2026-01-10T18:04:40.585963Z"}},"outputs":[],"execution_count":null},{"cell_type":"code","source":"early_stop = EarlyStopping(\n    monitor='val_loss',\n    patience=3,   \n    restore_best_weights=True\n)\n","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:04:40.587601Z","iopub.execute_input":"2026-01-10T18:04:40.587864Z","iopub.status.idle":"2026-01-10T18:04:40.591222Z","shell.execute_reply.started":"2026-01-10T18:04:40.587842Z","shell.execute_reply":"2026-01-10T18:04:40.590628Z"}},"outputs":[],"execution_count":null},{"cell_type":"code","source":"#train \n\nhistory = model.fit(\n    X_train, y_train,\n    validation_data=(X_val, y_val),\n    epochs=50,\n    batch_size=64,\n    verbose=1,\n    callbacks=[early_stop]\n)","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:04:40.592198Z","iopub.execute_input":"2026-01-10T18:04:40.592425Z","iopub.status.idle":"2026-01-10T18:11:32.574527Z","shell.execute_reply.started":"2026-01-10T18:04:40.592393Z","shell.execute_reply":"2026-01-10T18:11:32.57392Z"}},"outputs":[],"execution_count":null},{"cell_type":"code","source":"# evaluate \ny_val_pred = model.predict(X_val).ravel()\n\nmse = mean_squared_error(y_val, y_val_pred)\nr2 = r2_score(y_val, y_val_pred)\n\nprint(f\"MSE: {mse:.3f}\")\nprint(f\"R²: {r2:.3f}\")","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:11:32.575466Z","iopub.execute_input":"2026-01-10T18:11:32.575723Z","iopub.status.idle":"2026-01-10T18:11:43.213611Z","shell.execute_reply.started":"2026-01-10T18:11:32.5757Z","shell.execute_reply":"2026-01-10T18:11:43.212892Z"}},"outputs":[],"execution_count":null},{"cell_type":"markdown","source":"# Prediction and Submission","metadata":{}},{"cell_type":"code","source":"#preview submission format\nsub = pd.read_csv('/kaggle/input/gene-expression-prediction-cs1850-final/sample_submission.csv')\nsub.head()","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:04:24.102501Z","iopub.execute_input":"2026-01-10T18:04:24.10271Z","iopub.status.idle":"2026-01-10T18:04:24.248684Z","shell.execute_reply.started":"2026-01-10T18:04:24.102691Z","shell.execute_reply":"2026-01-10T18:04:24.248116Z"}},"outputs":[],"execution_count":null},{"cell_type":"code","source":"sub.shape","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:04:24.24957Z","iopub.execute_input":"2026-01-10T18:04:24.249812Z","iopub.status.idle":"2026-01-10T18:04:24.254397Z","shell.execute_reply.started":"2026-01-10T18:04:24.249791Z","shell.execute_reply":"2026-01-10T18:04:24.253718Z"}},"outputs":[],"execution_count":null},{"cell_type":"code","source":"#Making Predictions using the testing dataset\ny_eval_pred = model.predict(eval_inputs).squeeze()\n","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:51:15.594119Z","iopub.execute_input":"2026-01-10T18:51:15.594622Z","iopub.status.idle":"2026-01-10T18:51:27.067888Z","shell.execute_reply.started":"2026-01-10T18:51:15.594594Z","shell.execute_reply":"2026-01-10T18:51:27.067306Z"}},"outputs":[],"execution_count":null},{"cell_type":"code","source":"#Reformating the prediction to resample the submission format\ncell_list = []\ngene_list = []\n\nfor cell in eval_cells:\n    cell_data = eval_data[cell]\n    n_genes = cell_data.shape[0]\n    \n    cell_list.extend([cell] * n_genes)\n    gene_list.extend(cell_data[:, 0, 0].astype(int))\n\nids = [f\"{cell}_{gene}\" for cell, gene in zip(cell_list, gene_list)]\n\nsubmission = pd.DataFrame({\n    \"id\": ids,\n    \"expression\": y_eval_pred\n})\n","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:52:37.979982Z","iopub.execute_input":"2026-01-10T18:52:37.98028Z","iopub.status.idle":"2026-01-10T18:52:39.67401Z","shell.execute_reply.started":"2026-01-10T18:52:37.980255Z","shell.execute_reply":"2026-01-10T18:52:39.673204Z"}},"outputs":[],"execution_count":null},{"cell_type":"code","source":"#Importing to CSV\nsubmission.to_csv(\"submission.csv\", index=False)","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:52:42.701921Z","iopub.execute_input":"2026-01-10T18:52:42.702588Z","iopub.status.idle":"2026-01-10T18:52:42.973069Z","shell.execute_reply.started":"2026-01-10T18:52:42.702562Z","shell.execute_reply":"2026-01-10T18:52:42.972476Z"}},"outputs":[],"execution_count":null},{"cell_type":"code","source":"pd.read_csv('/kaggle/working/submission.csv').head()","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2026-01-10T18:53:57.67883Z","iopub.execute_input":"2026-01-10T18:53:57.679573Z","iopub.status.idle":"2026-01-10T18:53:57.77277Z","shell.execute_reply.started":"2026-01-10T18:53:57.679545Z","shell.execute_reply":"2026-01-10T18:53:57.772045Z"}},"outputs":[],"execution_count":null},{"cell_type":"code","source":"","metadata":{"trusted":true},"outputs":[],"execution_count":null}]}
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "id": "cd3f3a60",
+   "metadata": {
+    "_cell_guid": "b1076dfc-b9ad-4769-8c92-a6c4dae69d19",
+    "_uuid": "8f2839f25d086af736a60e9eeb907d3b93b6e0e5",
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:09.435649Z",
+     "iopub.status.busy": "2026-01-11T19:36:09.434994Z",
+     "iopub.status.idle": "2026-01-11T19:36:10.174343Z",
+     "shell.execute_reply": "2026-01-11T19:36:10.173694Z"
+    },
+    "papermill": {
+     "duration": 0.746484,
+     "end_time": "2026-01-11T19:36:10.176066",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:09.429582",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "/kaggle/input/gene-expression-prediction-cs1850-final/sample_submission.csv\n",
+      "/kaggle/input/gene-expression-prediction-cs1850-final/train.npz\n",
+      "/kaggle/input/gene-expression-prediction-cs1850-final/info.py\n",
+      "/kaggle/input/gene-expression-prediction-cs1850-final/eval.npz\n",
+      "/kaggle/input/gene-expression-prediction-cs1850-final/seq_data.csv\n"
+     ]
+    }
+   ],
+   "source": [
+    "# This Python 3 environment comes with many helpful analytics libraries installed\n",
+    "# It is defined by the kaggle/python Docker image: https://github.com/kaggle/docker-python\n",
+    "# For example, here's several helpful packages to load\n",
+    "\n",
+    "import numpy as np # linear algebra\n",
+    "import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)\n",
+    "\n",
+    "# Input data files are available in the read-only \"../input/\" directory\n",
+    "# For example, running this (by clicking run or pressing Shift+Enter) will list all files under the input directory\n",
+    "\n",
+    "import os\n",
+    "for dirname, _, filenames in os.walk('/kaggle/input'):\n",
+    "    for filename in filenames:\n",
+    "        print(os.path.join(dirname, filename))\n",
+    "\n",
+    "# You can write up to 20GB to the current directory (/kaggle/working/) that gets preserved as output when you create a version using \"Save & Run All\" \n",
+    "# You can also write temporary files to /kaggle/temp/, but they won't be saved outside of the current session"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "87606bcc",
+   "metadata": {
+    "papermill": {
+     "duration": 0.003543,
+     "end_time": "2026-01-11T19:36:10.183622",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:10.180079",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "source": [
+    "\n",
+    "- In the first notebook ([Gene Expression prediction (Baseline + 1D CNN)](http://www.kaggle.com/code/mariamali12/gene-expression-prediction-baseline-1d-cnn)), we built a 1D CNN model to predict the gene expression using histone markers as a feature.\n",
+    "  \n",
+    "- In this notebook, we will extend our work and try to improve our model performance using an additional feature (cell type)\n",
+    "\n",
+    "- What we are trying to answer in this notebook is could adding cell type info improve the model performance? \n",
+    "  "
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "0ca9ea4a",
+   "metadata": {
+    "papermill": {
+     "duration": 0.003398,
+     "end_time": "2026-01-11T19:36:10.190563",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:10.187165",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "source": [
+    "# Libraries Importing "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "id": "9b2804df",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:10.198990Z",
+     "iopub.status.busy": "2026-01-11T19:36:10.198270Z",
+     "iopub.status.idle": "2026-01-11T19:36:24.996709Z",
+     "shell.execute_reply": "2026-01-11T19:36:24.995941Z"
+    },
+    "papermill": {
+     "duration": 14.804531,
+     "end_time": "2026-01-11T19:36:24.998551",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:10.194020",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "2026-01-11 19:36:13.200074: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered\n",
+      "WARNING: All log messages before absl::InitializeLog() is called are written to STDERR\n",
+      "E0000 00:00:1768160173.385314      24 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered\n",
+      "E0000 00:00:1768160173.436355      24 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered\n",
+      "W0000 00:00:1768160173.873400      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.\n",
+      "W0000 00:00:1768160173.873463      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.\n",
+      "W0000 00:00:1768160173.873467      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.\n",
+      "W0000 00:00:1768160173.873470      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.\n"
+     ]
+    }
+   ],
+   "source": [
+    "import random\n",
+    "import matplotlib.pyplot as plt\n",
+    "from sklearn.model_selection import train_test_split\n",
+    "from sklearn.linear_model import Ridge\n",
+    "from sklearn.metrics import mean_squared_error, r2_score\n",
+    "from sklearn.preprocessing import StandardScaler\n",
+    "import tensorflow as tf\n",
+    "from tensorflow.keras.models import Model\n",
+    "from tensorflow.keras.layers import Input, Embedding, Concatenate, Conv1D, MaxPooling1D, Flatten, Dense, Dropout, GlobalAveragePooling1D, BatchNormalization\n",
+    "from tensorflow.keras.callbacks import EarlyStopping\n",
+    "from tensorflow.keras.regularizers import l2"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "id": "a3f6531f",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:25.007407Z",
+     "iopub.status.busy": "2026-01-11T19:36:25.006969Z",
+     "iopub.status.idle": "2026-01-11T19:36:25.011033Z",
+     "shell.execute_reply": "2026-01-11T19:36:25.010483Z"
+    },
+    "papermill": {
+     "duration": 0.009772,
+     "end_time": "2026-01-11T19:36:25.012281",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:25.002509",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "#Set Random seeds\n",
+    "SEED = 42\n",
+    "\n",
+    "os.environ[\"PYTHONHASHSEED\"] = str(SEED)\n",
+    "random.seed(SEED)\n",
+    "np.random.seed(SEED)\n",
+    "tf.random.set_seed(SEED)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "686144cb",
+   "metadata": {
+    "papermill": {
+     "duration": 0.003471,
+     "end_time": "2026-01-11T19:36:25.019388",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:25.015917",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "source": [
+    "# Exploring Datasets"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "id": "f967e3f2",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:25.028809Z",
+     "iopub.status.busy": "2026-01-11T19:36:25.028271Z",
+     "iopub.status.idle": "2026-01-11T19:36:25.051100Z",
+     "shell.execute_reply": "2026-01-11T19:36:25.050575Z"
+    },
+    "papermill": {
+     "duration": 0.028543,
+     "end_time": "2026-01-11T19:36:25.052347",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:25.023804",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "50"
+      ]
+     },
+     "execution_count": 4,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "#Load training dataset\n",
+    "train_data = np.load('/kaggle/input/gene-expression-prediction-cs1850-final/train.npz')\n",
+    "len(train_data.files)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "id": "d1b15c14",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:25.060988Z",
+     "iopub.status.busy": "2026-01-11T19:36:25.060426Z",
+     "iopub.status.idle": "2026-01-11T19:36:25.075373Z",
+     "shell.execute_reply": "2026-01-11T19:36:25.074727Z"
+    },
+    "papermill": {
+     "duration": 0.020605,
+     "end_time": "2026-01-11T19:36:25.076728",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:25.056123",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "56"
+      ]
+     },
+     "execution_count": 5,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "#Load testing dataset\n",
+    "eval_data = np.load('/kaggle/input/gene-expression-prediction-cs1850-final/eval.npz')\n",
+    "len(eval_data.files)\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "id": "f6eec4bb",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:25.085261Z",
+     "iopub.status.busy": "2026-01-11T19:36:25.085046Z",
+     "iopub.status.idle": "2026-01-11T19:36:25.237754Z",
+     "shell.execute_reply": "2026-01-11T19:36:25.237022Z"
+    },
+    "papermill": {
+     "duration": 0.158593,
+     "end_time": "2026-01-11T19:36:25.239262",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:25.080669",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "16000"
+      ]
+     },
+     "execution_count": 6,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "len(train_data['E065'][:,:,6])"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "73fca511",
+   "metadata": {
+    "papermill": {
+     "duration": 0.003917,
+     "end_time": "2026-01-11T19:36:25.247305",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:25.243388",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "source": [
+    "### Training dataset structure:\n",
+    "- **First column:** gene ID\n",
+    "- **Second-sixth columns:** histone modification measurements\n",
+    "- **Seventh column:** gene expression\n",
+    "\n",
+    "### Each cell type contains:\n",
+    "- 16000 genes\n",
+    "- 100 bins\n",
+    "- 5 histone markers\n",
+    "- Each gene–cell pair is treated as an independent training example."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "id": "5d0f37f6",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:25.256273Z",
+     "iopub.status.busy": "2026-01-11T19:36:25.255854Z",
+     "iopub.status.idle": "2026-01-11T19:36:25.260508Z",
+     "shell.execute_reply": "2026-01-11T19:36:25.259793Z"
+    },
+    "papermill": {
+     "duration": 0.010725,
+     "end_time": "2026-01-11T19:36:25.261897",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:25.251172",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "# Keys to npzfile of train & eval\n",
+    "train_cells = ['E065', 'E004', 'E066', 'E005', 'E012', 'E027', 'E053', 'E013', 'E028', 'E061', 'E109', 'E120',\n",
+    "               'E062', 'E037', 'E038', 'E024', 'E105', 'E011', 'E106', 'E082', 'E097', 'E116', 'E098', 'E058', \n",
+    "'E117', 'E059', 'E070', 'E118', 'E085', 'E104', 'E119', 'E006', 'E127', 'E047', 'E094', 'E007', 'E054', 'E128',\n",
+    "               'E095', 'E055', 'E114', 'E100', 'E056', 'E016', 'E122', 'E057', 'E123', 'E079', 'E003', 'E050']\n",
+    "Tcell_to_id = {cell: idx for idx, cell in enumerate(train_cells)}\n",
+    "Tnum_cells = len(Tcell_to_id)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "id": "f106f2f6",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:25.270639Z",
+     "iopub.status.busy": "2026-01-11T19:36:25.270004Z",
+     "iopub.status.idle": "2026-01-11T19:36:25.274635Z",
+     "shell.execute_reply": "2026-01-11T19:36:25.273898Z"
+    },
+    "papermill": {
+     "duration": 0.010324,
+     "end_time": "2026-01-11T19:36:25.275941",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:25.265617",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "eval_cells = ['E065', 'E004', 'E066', 'E005', 'E012', 'E027', 'E053', 'E013', 'E028', 'E061', 'E109', 'E120', \n",
+    "              'E062', 'E037', 'E038', 'E024', 'E071', 'E105', 'E087', 'E011', 'E106', 'E096', 'E082', 'E097', \n",
+    "'E116', 'E098', 'E058', 'E117', 'E084', 'E059', 'E070', 'E118', 'E085', 'E104', 'E119', 'E006', 'E112', 'E127',\n",
+    "              'E047', 'E094', 'E007', 'E054', 'E113', 'E128', 'E095', 'E055', 'E114', 'E100', 'E056', 'E016', 'E122',\n",
+    "              'E057', 'E123', 'E079', 'E003', 'E050']\n",
+    "Ecell_to_id = {cell: idx for idx, cell in enumerate(eval_cells)}\n",
+    "Enum_cells = len(Ecell_to_id)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 9,
+   "id": "b2a7180a",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:25.284357Z",
+     "iopub.status.busy": "2026-01-11T19:36:25.284144Z",
+     "iopub.status.idle": "2026-01-11T19:36:34.160950Z",
+     "shell.execute_reply": "2026-01-11T19:36:34.160295Z"
+    },
+    "papermill": {
+     "duration": 8.883019,
+     "end_time": "2026-01-11T19:36:34.162688",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:25.279669",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "# Combine Train Data to use information from all cells\n",
+    "train_inputs = [] # histone mark data (X)\n",
+    "train_outputs = [] # expression value (y)\n",
+    "Tcell_id_list = []\n",
+    "for cell in train_cells:\n",
+    "    cell_data = train_data[cell]\n",
+    "    hm_data = cell_data[:,:,1:6]\n",
+    "    exp_values = cell_data[:,0,6]\n",
+    "    cell_ids = np.full(len(exp_values), Tcell_to_id[cell])\n",
+    "    train_inputs.append(hm_data)\n",
+    "    train_outputs.append(exp_values)\n",
+    "    Tcell_id_list.append(cell_ids)\n",
+    "\n",
+    "train_inputs = np.concatenate(train_inputs, axis=0)\n",
+    "train_outputs = np.concatenate(train_outputs, axis=0)\n",
+    "Tcell_ids = np.concatenate(Tcell_id_list, axis=0)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "id": "6e3dfc74",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:34.172201Z",
+     "iopub.status.busy": "2026-01-11T19:36:34.171371Z",
+     "iopub.status.idle": "2026-01-11T19:36:34.175987Z",
+     "shell.execute_reply": "2026-01-11T19:36:34.175142Z"
+    },
+    "papermill": {
+     "duration": 0.010713,
+     "end_time": "2026-01-11T19:36:34.177533",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:34.166820",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "(800000, 100, 5)\n",
+      "(800000,)\n",
+      "(800000,)\n"
+     ]
+    }
+   ],
+   "source": [
+    "print(train_inputs.shape)\n",
+    "print(train_outputs.shape)\n",
+    "print(Tcell_ids.shape)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 11,
+   "id": "df073b19",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:34.186136Z",
+     "iopub.status.busy": "2026-01-11T19:36:34.185764Z",
+     "iopub.status.idle": "2026-01-11T19:36:36.331613Z",
+     "shell.execute_reply": "2026-01-11T19:36:36.330751Z"
+    },
+    "papermill": {
+     "duration": 2.151981,
+     "end_time": "2026-01-11T19:36:36.333348",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:34.181367",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "# Prepare Eval inputs in a similar way\n",
+    "eval_X = []\n",
+    "eval_cell_ids = []\n",
+    "eval_ids = []\n",
+    "\n",
+    "for cell in eval_data.files:\n",
+    "    cell_array = eval_data[cell]\n",
+    "    \n",
+    "    X_cell = cell_array[:, :, 1:6]\n",
+    "    genes = cell_array[:, 0, 0].astype(int)\n",
+    "    \n",
+    "    eval_X.append(X_cell)\n",
+    "    eval_cell_ids.append(\n",
+    "        np.full(len(genes), Ecell_to_id[cell])\n",
+    "    )\n",
+    "    \n",
+    "    eval_ids.extend([f\"{cell}_{g}\" for g in genes])\n",
+    "\n",
+    "eval_X = np.concatenate(eval_X)\n",
+    "eval_cell_ids = np.concatenate(eval_cell_ids)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 12,
+   "id": "ff795b0b",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:36.342717Z",
+     "iopub.status.busy": "2026-01-11T19:36:36.342084Z",
+     "iopub.status.idle": "2026-01-11T19:36:36.345993Z",
+     "shell.execute_reply": "2026-01-11T19:36:36.345278Z"
+    },
+    "papermill": {
+     "duration": 0.009888,
+     "end_time": "2026-01-11T19:36:36.347279",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:36.337391",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "(177032, 100, 5)\n"
+     ]
+    }
+   ],
+   "source": [
+    "print(eval_X.shape)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 13,
+   "id": "95e7764e",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:36.355837Z",
+     "iopub.status.busy": "2026-01-11T19:36:36.355647Z",
+     "iopub.status.idle": "2026-01-11T19:36:36.363845Z",
+     "shell.execute_reply": "2026-01-11T19:36:36.363123Z"
+    },
+    "papermill": {
+     "duration": 0.014016,
+     "end_time": "2026-01-11T19:36:36.365108",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:36.351092",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Mean: -0.27236924\n",
+      "Std: 1.8670437\n",
+      "Min: -5.204512\n",
+      "Max: 10.710043\n"
+     ]
+    }
+   ],
+   "source": [
+    "#explore the expression values statistically\n",
+    "\n",
+    "print(\"Mean:\", np.mean(train_outputs))\n",
+    "print(\"Std:\", np.std(train_outputs))\n",
+    "print(\"Min:\", np.min(train_outputs))\n",
+    "print(\"Max:\", np.max(train_outputs))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "71092057",
+   "metadata": {
+    "papermill": {
+     "duration": 0.003757,
+     "end_time": "2026-01-11T19:36:36.372801",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:36.369044",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "source": [
+    "# Model Building"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "25c2c29f",
+   "metadata": {
+    "papermill": {
+     "duration": 0.003798,
+     "end_time": "2026-01-11T19:36:36.380397",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:36.376599",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "source": [
+    "# Build 1D CNN model"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 14,
+   "id": "12c2f682",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:36.389178Z",
+     "iopub.status.busy": "2026-01-11T19:36:36.388659Z",
+     "iopub.status.idle": "2026-01-11T19:36:36.391747Z",
+     "shell.execute_reply": "2026-01-11T19:36:36.391084Z"
+    },
+    "papermill": {
+     "duration": 0.008827,
+     "end_time": "2026-01-11T19:36:36.393052",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:36.384225",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "X = train_inputs\n",
+    "y = train_outputs"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 15,
+   "id": "87979cfd",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:36.402155Z",
+     "iopub.status.busy": "2026-01-11T19:36:36.401636Z",
+     "iopub.status.idle": "2026-01-11T19:36:36.418060Z",
+     "shell.execute_reply": "2026-01-11T19:36:36.417370Z"
+    },
+    "papermill": {
+     "duration": 0.022465,
+     "end_time": "2026-01-11T19:36:36.419476",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:36.397011",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "#scaling the target\n",
+    "scaler = StandardScaler()\n",
+    "y_scaled = scaler.fit_transform(y.reshape(-1, 1)).flatten()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 16,
+   "id": "976a5419",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:36.428077Z",
+     "iopub.status.busy": "2026-01-11T19:36:36.427857Z",
+     "iopub.status.idle": "2026-01-11T19:36:36.432159Z",
+     "shell.execute_reply": "2026-01-11T19:36:36.431267Z"
+    },
+    "papermill": {
+     "duration": 0.010825,
+     "end_time": "2026-01-11T19:36:36.434077",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:36.423252",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "numpy.ndarray"
+      ]
+     },
+     "execution_count": 16,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "type(y_scaled)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 17,
+   "id": "674c1e79",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:36.443143Z",
+     "iopub.status.busy": "2026-01-11T19:36:36.442699Z",
+     "iopub.status.idle": "2026-01-11T19:36:37.017050Z",
+     "shell.execute_reply": "2026-01-11T19:36:37.016460Z"
+    },
+    "papermill": {
+     "duration": 0.580719,
+     "end_time": "2026-01-11T19:36:37.018765",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:36.438046",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "#train/validate split\n",
+    "X_train, X_val, y_train, y_val, cell_train, cell_val= train_test_split(X, y_scaled, Tcell_ids, test_size=0.2, random_state=SEED)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 18,
+   "id": "bdf0ae35",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:37.028186Z",
+     "iopub.status.busy": "2026-01-11T19:36:37.027972Z",
+     "iopub.status.idle": "2026-01-11T19:36:39.200992Z",
+     "shell.execute_reply": "2026-01-11T19:36:39.200192Z"
+    },
+    "papermill": {
+     "duration": 2.179491,
+     "end_time": "2026-01-11T19:36:39.202613",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:37.023122",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "I0000 00:00:1768160197.855039      24 gpu_device.cc:2019] Created device /job:localhost/replica:0/task:0/device:GPU:0 with 13942 MB memory:  -> device: 0, name: Tesla T4, pci bus id: 0000:00:04.0, compute capability: 7.5\n",
+      "I0000 00:00:1768160197.855699      24 gpu_device.cc:2019] Created device /job:localhost/replica:0/task:0/device:GPU:1 with 13942 MB memory:  -> device: 1, name: Tesla T4, pci bus id: 0000:00:05.0, compute capability: 7.5\n"
+     ]
+    }
+   ],
+   "source": [
+    "#Functional CNN\n",
+    "\n",
+    "signal_input = Input(shape=(100, 5), name=\"histone_input\")\n",
+    "\n",
+    "x = Conv1D(32, kernel_size=5, padding=\"same\", activation=\"relu\")(signal_input)\n",
+    "x = Conv1D(64, kernel_size=5, padding=\"same\", activation=\"relu\")(x)\n",
+    "x = MaxPooling1D(pool_size=2)(x)\n",
+    "\n",
+    "x = Conv1D(128, kernel_size=7, padding=\"same\", activation=\"relu\")(x)\n",
+    "x = GlobalAveragePooling1D()(x)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 19,
+   "id": "d25bb0ef",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:39.212605Z",
+     "iopub.status.busy": "2026-01-11T19:36:39.212265Z",
+     "iopub.status.idle": "2026-01-11T19:36:39.222054Z",
+     "shell.execute_reply": "2026-01-11T19:36:39.221539Z"
+    },
+    "papermill": {
+     "duration": 0.016498,
+     "end_time": "2026-01-11T19:36:39.223321",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:39.206823",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "#encoding cell-type code using embedding\n",
+    "cell_input = Input(shape=(1,), name=\"cell_id\")\n",
+    "\n",
+    "cell_embed = Embedding(\n",
+    "    input_dim=Enum_cells,\n",
+    "    output_dim=16,\n",
+    "    name=\"cell_embedding\"\n",
+    ")(cell_input)\n",
+    "\n",
+    "cell_embed = Flatten()(cell_embed)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 20,
+   "id": "6feedd67",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:39.232721Z",
+     "iopub.status.busy": "2026-01-11T19:36:39.232498Z",
+     "iopub.status.idle": "2026-01-11T19:36:39.253346Z",
+     "shell.execute_reply": "2026-01-11T19:36:39.252837Z"
+    },
+    "papermill": {
+     "duration": 0.026998,
+     "end_time": "2026-01-11T19:36:39.254618",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:39.227620",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "# combine the 2 models\n",
+    "\n",
+    "combined = Concatenate()([x, cell_embed])\n",
+    "\n",
+    "combined = Dense(128, activation=\"relu\")(combined)\n",
+    "combined = Dropout(0.2)(combined)\n",
+    "\n",
+    "output = Dense(1, activation=\"linear\")(combined)\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 21,
+   "id": "88e6a2d7",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:39.263885Z",
+     "iopub.status.busy": "2026-01-11T19:36:39.263594Z",
+     "iopub.status.idle": "2026-01-11T19:36:39.292567Z",
+     "shell.execute_reply": "2026-01-11T19:36:39.292037Z"
+    },
+    "papermill": {
+     "duration": 0.035202,
+     "end_time": "2026-01-11T19:36:39.293883",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:39.258681",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<pre style=\"white-space:pre;overflow-x:auto;line-height:normal;font-family:Menlo,'DejaVu Sans Mono',consolas,'Courier New',monospace\"><span style=\"font-weight: bold\">Model: \"functional\"</span>\n",
+       "</pre>\n"
+      ],
+      "text/plain": [
+       "\u001b[1mModel: \"functional\"\u001b[0m\n"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "text/html": [
+       "<pre style=\"white-space:pre;overflow-x:auto;line-height:normal;font-family:Menlo,'DejaVu Sans Mono',consolas,'Courier New',monospace\">┏━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┓\n",
+       "┃<span style=\"font-weight: bold\"> Layer (type)        </span>┃<span style=\"font-weight: bold\"> Output Shape      </span>┃<span style=\"font-weight: bold\">    Param # </span>┃<span style=\"font-weight: bold\"> Connected to      </span>┃\n",
+       "┡━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━┩\n",
+       "│ histone_input       │ (<span style=\"color: #00d7ff; text-decoration-color: #00d7ff\">None</span>, <span style=\"color: #00af00; text-decoration-color: #00af00\">100</span>, <span style=\"color: #00af00; text-decoration-color: #00af00\">5</span>)    │          <span style=\"color: #00af00; text-decoration-color: #00af00\">0</span> │ -                 │\n",
+       "│ (<span style=\"color: #0087ff; text-decoration-color: #0087ff\">InputLayer</span>)        │                   │            │                   │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ conv1d (<span style=\"color: #0087ff; text-decoration-color: #0087ff\">Conv1D</span>)     │ (<span style=\"color: #00d7ff; text-decoration-color: #00d7ff\">None</span>, <span style=\"color: #00af00; text-decoration-color: #00af00\">100</span>, <span style=\"color: #00af00; text-decoration-color: #00af00\">32</span>)   │        <span style=\"color: #00af00; text-decoration-color: #00af00\">832</span> │ histone_input[<span style=\"color: #00af00; text-decoration-color: #00af00\">0</span>]… │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ conv1d_1 (<span style=\"color: #0087ff; text-decoration-color: #0087ff\">Conv1D</span>)   │ (<span style=\"color: #00d7ff; text-decoration-color: #00d7ff\">None</span>, <span style=\"color: #00af00; text-decoration-color: #00af00\">100</span>, <span style=\"color: #00af00; text-decoration-color: #00af00\">64</span>)   │     <span style=\"color: #00af00; text-decoration-color: #00af00\">10,304</span> │ conv1d[<span style=\"color: #00af00; text-decoration-color: #00af00\">0</span>][<span style=\"color: #00af00; text-decoration-color: #00af00\">0</span>]      │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ max_pooling1d       │ (<span style=\"color: #00d7ff; text-decoration-color: #00d7ff\">None</span>, <span style=\"color: #00af00; text-decoration-color: #00af00\">50</span>, <span style=\"color: #00af00; text-decoration-color: #00af00\">64</span>)    │          <span style=\"color: #00af00; text-decoration-color: #00af00\">0</span> │ conv1d_1[<span style=\"color: #00af00; text-decoration-color: #00af00\">0</span>][<span style=\"color: #00af00; text-decoration-color: #00af00\">0</span>]    │\n",
+       "│ (<span style=\"color: #0087ff; text-decoration-color: #0087ff\">MaxPooling1D</span>)      │                   │            │                   │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ cell_id             │ (<span style=\"color: #00d7ff; text-decoration-color: #00d7ff\">None</span>, <span style=\"color: #00af00; text-decoration-color: #00af00\">1</span>)         │          <span style=\"color: #00af00; text-decoration-color: #00af00\">0</span> │ -                 │\n",
+       "│ (<span style=\"color: #0087ff; text-decoration-color: #0087ff\">InputLayer</span>)        │                   │            │                   │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ conv1d_2 (<span style=\"color: #0087ff; text-decoration-color: #0087ff\">Conv1D</span>)   │ (<span style=\"color: #00d7ff; text-decoration-color: #00d7ff\">None</span>, <span style=\"color: #00af00; text-decoration-color: #00af00\">50</span>, <span style=\"color: #00af00; text-decoration-color: #00af00\">128</span>)   │     <span style=\"color: #00af00; text-decoration-color: #00af00\">57,472</span> │ max_pooling1d[<span style=\"color: #00af00; text-decoration-color: #00af00\">0</span>]… │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ cell_embedding      │ (<span style=\"color: #00d7ff; text-decoration-color: #00d7ff\">None</span>, <span style=\"color: #00af00; text-decoration-color: #00af00\">1</span>, <span style=\"color: #00af00; text-decoration-color: #00af00\">16</span>)     │        <span style=\"color: #00af00; text-decoration-color: #00af00\">896</span> │ cell_id[<span style=\"color: #00af00; text-decoration-color: #00af00\">0</span>][<span style=\"color: #00af00; text-decoration-color: #00af00\">0</span>]     │\n",
+       "│ (<span style=\"color: #0087ff; text-decoration-color: #0087ff\">Embedding</span>)         │                   │            │                   │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ global_average_poo… │ (<span style=\"color: #00d7ff; text-decoration-color: #00d7ff\">None</span>, <span style=\"color: #00af00; text-decoration-color: #00af00\">128</span>)       │          <span style=\"color: #00af00; text-decoration-color: #00af00\">0</span> │ conv1d_2[<span style=\"color: #00af00; text-decoration-color: #00af00\">0</span>][<span style=\"color: #00af00; text-decoration-color: #00af00\">0</span>]    │\n",
+       "│ (<span style=\"color: #0087ff; text-decoration-color: #0087ff\">GlobalAveragePool…</span> │                   │            │                   │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ flatten (<span style=\"color: #0087ff; text-decoration-color: #0087ff\">Flatten</span>)   │ (<span style=\"color: #00d7ff; text-decoration-color: #00d7ff\">None</span>, <span style=\"color: #00af00; text-decoration-color: #00af00\">16</span>)        │          <span style=\"color: #00af00; text-decoration-color: #00af00\">0</span> │ cell_embedding[<span style=\"color: #00af00; text-decoration-color: #00af00\">0</span>… │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ concatenate         │ (<span style=\"color: #00d7ff; text-decoration-color: #00d7ff\">None</span>, <span style=\"color: #00af00; text-decoration-color: #00af00\">144</span>)       │          <span style=\"color: #00af00; text-decoration-color: #00af00\">0</span> │ global_average_p… │\n",
+       "│ (<span style=\"color: #0087ff; text-decoration-color: #0087ff\">Concatenate</span>)       │                   │            │ flatten[<span style=\"color: #00af00; text-decoration-color: #00af00\">0</span>][<span style=\"color: #00af00; text-decoration-color: #00af00\">0</span>]     │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ dense (<span style=\"color: #0087ff; text-decoration-color: #0087ff\">Dense</span>)       │ (<span style=\"color: #00d7ff; text-decoration-color: #00d7ff\">None</span>, <span style=\"color: #00af00; text-decoration-color: #00af00\">128</span>)       │     <span style=\"color: #00af00; text-decoration-color: #00af00\">18,560</span> │ concatenate[<span style=\"color: #00af00; text-decoration-color: #00af00\">0</span>][<span style=\"color: #00af00; text-decoration-color: #00af00\">0</span>] │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ dropout (<span style=\"color: #0087ff; text-decoration-color: #0087ff\">Dropout</span>)   │ (<span style=\"color: #00d7ff; text-decoration-color: #00d7ff\">None</span>, <span style=\"color: #00af00; text-decoration-color: #00af00\">128</span>)       │          <span style=\"color: #00af00; text-decoration-color: #00af00\">0</span> │ dense[<span style=\"color: #00af00; text-decoration-color: #00af00\">0</span>][<span style=\"color: #00af00; text-decoration-color: #00af00\">0</span>]       │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ dense_1 (<span style=\"color: #0087ff; text-decoration-color: #0087ff\">Dense</span>)     │ (<span style=\"color: #00d7ff; text-decoration-color: #00d7ff\">None</span>, <span style=\"color: #00af00; text-decoration-color: #00af00\">1</span>)         │        <span style=\"color: #00af00; text-decoration-color: #00af00\">129</span> │ dropout[<span style=\"color: #00af00; text-decoration-color: #00af00\">0</span>][<span style=\"color: #00af00; text-decoration-color: #00af00\">0</span>]     │\n",
+       "└─────────────────────┴───────────────────┴────────────┴───────────────────┘\n",
+       "</pre>\n"
+      ],
+      "text/plain": [
+       "┏━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━┓\n",
+       "┃\u001b[1m \u001b[0m\u001b[1mLayer (type)       \u001b[0m\u001b[1m \u001b[0m┃\u001b[1m \u001b[0m\u001b[1mOutput Shape     \u001b[0m\u001b[1m \u001b[0m┃\u001b[1m \u001b[0m\u001b[1m   Param #\u001b[0m\u001b[1m \u001b[0m┃\u001b[1m \u001b[0m\u001b[1mConnected to     \u001b[0m\u001b[1m \u001b[0m┃\n",
+       "┡━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━┩\n",
+       "│ histone_input       │ (\u001b[38;5;45mNone\u001b[0m, \u001b[38;5;34m100\u001b[0m, \u001b[38;5;34m5\u001b[0m)    │          \u001b[38;5;34m0\u001b[0m │ -                 │\n",
+       "│ (\u001b[38;5;33mInputLayer\u001b[0m)        │                   │            │                   │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ conv1d (\u001b[38;5;33mConv1D\u001b[0m)     │ (\u001b[38;5;45mNone\u001b[0m, \u001b[38;5;34m100\u001b[0m, \u001b[38;5;34m32\u001b[0m)   │        \u001b[38;5;34m832\u001b[0m │ histone_input[\u001b[38;5;34m0\u001b[0m]… │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ conv1d_1 (\u001b[38;5;33mConv1D\u001b[0m)   │ (\u001b[38;5;45mNone\u001b[0m, \u001b[38;5;34m100\u001b[0m, \u001b[38;5;34m64\u001b[0m)   │     \u001b[38;5;34m10,304\u001b[0m │ conv1d[\u001b[38;5;34m0\u001b[0m][\u001b[38;5;34m0\u001b[0m]      │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ max_pooling1d       │ (\u001b[38;5;45mNone\u001b[0m, \u001b[38;5;34m50\u001b[0m, \u001b[38;5;34m64\u001b[0m)    │          \u001b[38;5;34m0\u001b[0m │ conv1d_1[\u001b[38;5;34m0\u001b[0m][\u001b[38;5;34m0\u001b[0m]    │\n",
+       "│ (\u001b[38;5;33mMaxPooling1D\u001b[0m)      │                   │            │                   │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ cell_id             │ (\u001b[38;5;45mNone\u001b[0m, \u001b[38;5;34m1\u001b[0m)         │          \u001b[38;5;34m0\u001b[0m │ -                 │\n",
+       "│ (\u001b[38;5;33mInputLayer\u001b[0m)        │                   │            │                   │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ conv1d_2 (\u001b[38;5;33mConv1D\u001b[0m)   │ (\u001b[38;5;45mNone\u001b[0m, \u001b[38;5;34m50\u001b[0m, \u001b[38;5;34m128\u001b[0m)   │     \u001b[38;5;34m57,472\u001b[0m │ max_pooling1d[\u001b[38;5;34m0\u001b[0m]… │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ cell_embedding      │ (\u001b[38;5;45mNone\u001b[0m, \u001b[38;5;34m1\u001b[0m, \u001b[38;5;34m16\u001b[0m)     │        \u001b[38;5;34m896\u001b[0m │ cell_id[\u001b[38;5;34m0\u001b[0m][\u001b[38;5;34m0\u001b[0m]     │\n",
+       "│ (\u001b[38;5;33mEmbedding\u001b[0m)         │                   │            │                   │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ global_average_poo… │ (\u001b[38;5;45mNone\u001b[0m, \u001b[38;5;34m128\u001b[0m)       │          \u001b[38;5;34m0\u001b[0m │ conv1d_2[\u001b[38;5;34m0\u001b[0m][\u001b[38;5;34m0\u001b[0m]    │\n",
+       "│ (\u001b[38;5;33mGlobalAveragePool…\u001b[0m │                   │            │                   │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ flatten (\u001b[38;5;33mFlatten\u001b[0m)   │ (\u001b[38;5;45mNone\u001b[0m, \u001b[38;5;34m16\u001b[0m)        │          \u001b[38;5;34m0\u001b[0m │ cell_embedding[\u001b[38;5;34m0\u001b[0m… │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ concatenate         │ (\u001b[38;5;45mNone\u001b[0m, \u001b[38;5;34m144\u001b[0m)       │          \u001b[38;5;34m0\u001b[0m │ global_average_p… │\n",
+       "│ (\u001b[38;5;33mConcatenate\u001b[0m)       │                   │            │ flatten[\u001b[38;5;34m0\u001b[0m][\u001b[38;5;34m0\u001b[0m]     │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ dense (\u001b[38;5;33mDense\u001b[0m)       │ (\u001b[38;5;45mNone\u001b[0m, \u001b[38;5;34m128\u001b[0m)       │     \u001b[38;5;34m18,560\u001b[0m │ concatenate[\u001b[38;5;34m0\u001b[0m][\u001b[38;5;34m0\u001b[0m] │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ dropout (\u001b[38;5;33mDropout\u001b[0m)   │ (\u001b[38;5;45mNone\u001b[0m, \u001b[38;5;34m128\u001b[0m)       │          \u001b[38;5;34m0\u001b[0m │ dense[\u001b[38;5;34m0\u001b[0m][\u001b[38;5;34m0\u001b[0m]       │\n",
+       "├─────────────────────┼───────────────────┼────────────┼───────────────────┤\n",
+       "│ dense_1 (\u001b[38;5;33mDense\u001b[0m)     │ (\u001b[38;5;45mNone\u001b[0m, \u001b[38;5;34m1\u001b[0m)         │        \u001b[38;5;34m129\u001b[0m │ dropout[\u001b[38;5;34m0\u001b[0m][\u001b[38;5;34m0\u001b[0m]     │\n",
+       "└─────────────────────┴───────────────────┴────────────┴───────────────────┘\n"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "text/html": [
+       "<pre style=\"white-space:pre;overflow-x:auto;line-height:normal;font-family:Menlo,'DejaVu Sans Mono',consolas,'Courier New',monospace\"><span style=\"font-weight: bold\"> Total params: </span><span style=\"color: #00af00; text-decoration-color: #00af00\">88,193</span> (344.50 KB)\n",
+       "</pre>\n"
+      ],
+      "text/plain": [
+       "\u001b[1m Total params: \u001b[0m\u001b[38;5;34m88,193\u001b[0m (344.50 KB)\n"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "text/html": [
+       "<pre style=\"white-space:pre;overflow-x:auto;line-height:normal;font-family:Menlo,'DejaVu Sans Mono',consolas,'Courier New',monospace\"><span style=\"font-weight: bold\"> Trainable params: </span><span style=\"color: #00af00; text-decoration-color: #00af00\">88,193</span> (344.50 KB)\n",
+       "</pre>\n"
+      ],
+      "text/plain": [
+       "\u001b[1m Trainable params: \u001b[0m\u001b[38;5;34m88,193\u001b[0m (344.50 KB)\n"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "text/html": [
+       "<pre style=\"white-space:pre;overflow-x:auto;line-height:normal;font-family:Menlo,'DejaVu Sans Mono',consolas,'Courier New',monospace\"><span style=\"font-weight: bold\"> Non-trainable params: </span><span style=\"color: #00af00; text-decoration-color: #00af00\">0</span> (0.00 B)\n",
+       "</pre>\n"
+      ],
+      "text/plain": [
+       "\u001b[1m Non-trainable params: \u001b[0m\u001b[38;5;34m0\u001b[0m (0.00 B)\n"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "# Final model\n",
+    "\n",
+    "model = Model(\n",
+    "    inputs=[signal_input, cell_input],\n",
+    "    outputs=output\n",
+    ")\n",
+    "\n",
+    "model.compile(\n",
+    "    optimizer=tf.keras.optimizers.Adam(learning_rate=5e-4),\n",
+    "    loss=\"mse\",\n",
+    "    metrics=[\"mse\"]\n",
+    ")\n",
+    "\n",
+    "model.summary()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 22,
+   "id": "c4c6d571",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:39.304121Z",
+     "iopub.status.busy": "2026-01-11T19:36:39.303603Z",
+     "iopub.status.idle": "2026-01-11T19:36:39.306834Z",
+     "shell.execute_reply": "2026-01-11T19:36:39.306192Z"
+    },
+    "papermill": {
+     "duration": 0.009793,
+     "end_time": "2026-01-11T19:36:39.308169",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:39.298376",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "early_stop = EarlyStopping(\n",
+    "    monitor='val_loss',\n",
+    "    patience=3,   \n",
+    "    restore_best_weights=True\n",
+    ")\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 23,
+   "id": "b6c4e50f",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:36:39.318554Z",
+     "iopub.status.busy": "2026-01-11T19:36:39.318043Z",
+     "iopub.status.idle": "2026-01-11T19:44:01.869784Z",
+     "shell.execute_reply": "2026-01-11T19:44:01.868432Z"
+    },
+    "papermill": {
+     "duration": 442.732536,
+     "end_time": "2026-01-11T19:44:02.045328",
+     "exception": false,
+     "start_time": "2026-01-11T19:36:39.312792",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 1/30\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "WARNING: All log messages before absl::InitializeLog() is called are written to STDERR\n",
+      "I0000 00:00:1768160203.638180      67 service.cc:152] XLA service 0x7d9330005030 initialized for platform CUDA (this does not guarantee that XLA will be used). Devices:\n",
+      "I0000 00:00:1768160203.638210      67 service.cc:160]   StreamExecutor device (0): Tesla T4, Compute Capability 7.5\n",
+      "I0000 00:00:1768160203.638214      67 service.cc:160]   StreamExecutor device (1): Tesla T4, Compute Capability 7.5\n",
+      "I0000 00:00:1768160203.985175      67 cuda_dnn.cc:529] Loaded cuDNN version 91002\n"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "\u001b[1m   56/10000\u001b[0m \u001b[37m━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[1m27s\u001b[0m 3ms/step - loss: 1.0266 - mse: 1.0266"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "I0000 00:00:1768160206.609606      67 device_compiler.h:188] Compiled cluster using XLA!  This line is logged at most once for the lifetime of the process.\n"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "\u001b[1m10000/10000\u001b[0m \u001b[32m━━━━━━━━━━━━━━━━━━━━\u001b[0m\u001b[37m\u001b[0m \u001b[1m39s\u001b[0m 3ms/step - loss: 0.9404 - mse: 0.9404 - val_loss: 0.9010 - val_mse: 0.9010\n",
+      "Epoch 2/30\n",
+      "\u001b[1m10000/10000\u001b[0m \u001b[32m━━━━━━━━━━━━━━━━━━━━\u001b[0m\u001b[37m\u001b[0m \u001b[1m33s\u001b[0m 3ms/step - loss: 0.9003 - mse: 0.9003 - val_loss: 0.8846 - val_mse: 0.8846\n",
+      "Epoch 3/30\n",
+      "\u001b[1m10000/10000\u001b[0m \u001b[32m━━━━━━━━━━━━━━━━━━━━\u001b[0m\u001b[37m\u001b[0m \u001b[1m33s\u001b[0m 3ms/step - loss: 0.8877 - mse: 0.8877 - val_loss: 0.8817 - val_mse: 0.8817\n",
+      "Epoch 4/30\n",
+      "\u001b[1m10000/10000\u001b[0m \u001b[32m━━━━━━━━━━━━━━━━━━━━\u001b[0m\u001b[37m\u001b[0m \u001b[1m33s\u001b[0m 3ms/step - loss: 0.8794 - mse: 0.8794 - val_loss: 0.8798 - val_mse: 0.8798\n",
+      "Epoch 5/30\n",
+      "\u001b[1m10000/10000\u001b[0m \u001b[32m━━━━━━━━━━━━━━━━━━━━\u001b[0m\u001b[37m\u001b[0m \u001b[1m33s\u001b[0m 3ms/step - loss: 0.8727 - mse: 0.8727 - val_loss: 0.8716 - val_mse: 0.8716\n",
+      "Epoch 6/30\n",
+      "\u001b[1m10000/10000\u001b[0m \u001b[32m━━━━━━━━━━━━━━━━━━━━\u001b[0m\u001b[37m\u001b[0m \u001b[1m33s\u001b[0m 3ms/step - loss: 0.8664 - mse: 0.8664 - val_loss: 0.8697 - val_mse: 0.8697\n",
+      "Epoch 7/30\n",
+      "\u001b[1m10000/10000\u001b[0m \u001b[32m━━━━━━━━━━━━━━━━━━━━\u001b[0m\u001b[37m\u001b[0m \u001b[1m33s\u001b[0m 3ms/step - loss: 0.8611 - mse: 0.8611 - val_loss: 0.8676 - val_mse: 0.8676\n",
+      "Epoch 8/30\n",
+      "\u001b[1m10000/10000\u001b[0m \u001b[32m━━━━━━━━━━━━━━━━━━━━\u001b[0m\u001b[37m\u001b[0m \u001b[1m33s\u001b[0m 3ms/step - loss: 0.8563 - mse: 0.8563 - val_loss: 0.8674 - val_mse: 0.8674\n",
+      "Epoch 9/30\n",
+      "\u001b[1m10000/10000\u001b[0m \u001b[32m━━━━━━━━━━━━━━━━━━━━\u001b[0m\u001b[37m\u001b[0m \u001b[1m33s\u001b[0m 3ms/step - loss: 0.8508 - mse: 0.8508 - val_loss: 0.8669 - val_mse: 0.8669\n",
+      "Epoch 10/30\n",
+      "\u001b[1m10000/10000\u001b[0m \u001b[32m━━━━━━━━━━━━━━━━━━━━\u001b[0m\u001b[37m\u001b[0m \u001b[1m34s\u001b[0m 3ms/step - loss: 0.8454 - mse: 0.8454 - val_loss: 0.8662 - val_mse: 0.8662\n",
+      "Epoch 11/30\n",
+      "\u001b[1m10000/10000\u001b[0m \u001b[32m━━━━━━━━━━━━━━━━━━━━\u001b[0m\u001b[37m\u001b[0m \u001b[1m34s\u001b[0m 3ms/step - loss: 0.8401 - mse: 0.8401 - val_loss: 0.8690 - val_mse: 0.8690\n",
+      "Epoch 12/30\n",
+      "\u001b[1m10000/10000\u001b[0m \u001b[32m━━━━━━━━━━━━━━━━━━━━\u001b[0m\u001b[37m\u001b[0m \u001b[1m33s\u001b[0m 3ms/step - loss: 0.8350 - mse: 0.8350 - val_loss: 0.8685 - val_mse: 0.8685\n",
+      "Epoch 13/30\n",
+      "\u001b[1m10000/10000\u001b[0m \u001b[32m━━━━━━━━━━━━━━━━━━━━\u001b[0m\u001b[37m\u001b[0m \u001b[1m33s\u001b[0m 3ms/step - loss: 0.8297 - mse: 0.8297 - val_loss: 0.8694 - val_mse: 0.8694\n"
+     ]
+    }
+   ],
+   "source": [
+    "#train \n",
+    "\n",
+    "history = model.fit(\n",
+    "    [X_train, cell_train],y_train,\n",
+    "    validation_data=([X_val, cell_val], y_val),\n",
+    "    epochs=30,\n",
+    "    batch_size=64,\n",
+    "    callbacks=[early_stop],\n",
+    "    verbose=1\n",
+    ")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 24,
+   "id": "3446eac8",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-01-11T19:44:02.661645Z",
+     "iopub.status.busy": "2026-01-11T19:44:02.661303Z",
+     "iopub.status.idle": "2026-01-11T19:44:13.611089Z",
+     "shell.execute_reply": "2026-01-11T19:44:13.610257Z"
+    },
+    "papermill": {
+     "duration": 11.297927,
+     "end_time": "2026-01-11T19:44:13.612694",
+     "exception": false,
+     "start_time": "2026-01-11T19:44:02.314767",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "\u001b[1m5000/5000\u001b[0m \u001b[32m━━━━━━━━━━━━━━━━━━━━\u001b[0m\u001b[37m\u001b[0m \u001b[1m8s\u001b[0m 1ms/step\n",
+      "MSE: 3.019\n",
+      "R²: 0.134\n"
+     ]
+    }
+   ],
+   "source": [
+    "y_val_pred_scaled = model.predict([X_val, cell_val]).flatten()\n",
+    "\n",
+    "y_val_pred = scaler.inverse_transform(\n",
+    "    y_val_pred_scaled.reshape(-1,1)\n",
+    ").flatten()\n",
+    "\n",
+    "y_val_true = scaler.inverse_transform(\n",
+    "    y_val.reshape(-1,1)\n",
+    ").flatten()\n",
+    "\n",
+    "mse = mean_squared_error(y_val_true, y_val_pred)\n",
+    "r2 = r2_score(y_val_true, y_val_pred)\n",
+    "\n",
+    "print(f\"MSE: {mse:.3f}\")\n",
+    "print(f\"R²: {r2:.3f}\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "36c70cee",
+   "metadata": {
+    "papermill": {
+     "duration": 0.268473,
+     "end_time": "2026-01-11T19:44:14.157309",
+     "exception": false,
+     "start_time": "2026-01-11T19:44:13.888836",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "kaggle": {
+   "accelerator": "nvidiaTeslaT4",
+   "dataSources": [
+    {
+     "databundleVersionId": 1117628,
+     "sourceId": 20182,
+     "sourceType": "competition"
+    }
+   ],
+   "dockerImageVersionId": 31236,
+   "isGpuEnabled": true,
+   "isInternetEnabled": true,
+   "language": "python",
+   "sourceType": "notebook"
+  },
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.12.12"
+  },
+  "papermill": {
+   "default_parameters": {},
+   "duration": 490.257996,
+   "end_time": "2026-01-11T19:44:17.212047",
+   "environment_variables": {},
+   "exception": null,
+   "input_path": "__notebook__.ipynb",
+   "output_path": "__notebook__.ipynb",
+   "parameters": {},
+   "start_time": "2026-01-11T19:36:06.954051",
+   "version": "2.6.0"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
